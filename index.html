@@ -7,7 +7,8 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #111; overflow: hidden; }
-    #canvas { display: block; image-rendering: pixelated; }
+    #canvas { display: block; image-rendering: pixelated; touch-action: none; }
+    #canvas.cell-selecting { cursor: crosshair; }
 
     /* ── Interaction prompt ── */
     #interact-hint {
@@ -122,19 +123,85 @@
     }
     #btn-e:active { background: rgba(102,153,204,0.5); }
 
-    /* ── Dev mode label ── */
-    #dev-label {
+    /* ── Dev tools ── */
+    #dev-tools {
       position: fixed;
       top: 8px;
       right: 12px;
+      z-index: 25;
+      width: 190px;
+      color: rgba(255,255,255,0.9);
       font-family: monospace;
       font-size: 11px;
-      color: rgba(255,200,80,0.8);
-      background: rgba(0,0,0,0.5);
-      padding: 3px 6px;
+    }
+    #dev-label {
+      display: block;
+      color: rgba(255,200,80,0.9);
+      background: rgba(0,0,0,0.68);
+      padding: 4px 6px;
       border-radius: 3px;
-      z-index: 10;
-      pointer-events: none;
+      text-align: right;
+    }
+    #cell-selector {
+      margin-top: 6px;
+      background: rgba(10,10,20,0.9);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 5px;
+      padding: 8px;
+    }
+    #cell-selector label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+      color: #fff;
+      font-weight: bold;
+    }
+    #cell-selector input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: #66ccff;
+      cursor: pointer;
+    }
+    #cell-selector-help {
+      margin-top: 5px;
+      color: rgba(210,225,240,0.72);
+      line-height: 1.4;
+    }
+    #grid-outputs {
+      margin-top: 6px;
+      background: rgba(10,10,20,0.9);
+      border: 1px solid rgba(102,204,255,0.45);
+      border-radius: 5px;
+      padding: 8px;
+      display: none;
+    }
+    #grid-outputs.visible {
+      display: block;
+    }
+    #grid-outputs-title {
+      color: #66ccff;
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+    #grid-outputs-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      max-height: 130px;
+      overflow-y: auto;
+    }
+    .grid-output {
+      color: #07111a;
+      background: #9de5ff;
+      border-radius: 3px;
+      padding: 2px 4px;
+      font-size: 10px;
+      font-weight: bold;
+    }
+    #grid-outputs-empty {
+      color: rgba(255,255,255,0.55);
     }
   </style>
 </head>
@@ -158,7 +225,20 @@
 </div>
 <div id="btn-e">E</div>
 
-<div id="dev-label">DEV MODE — Grid: 16×10 &nbsp;|&nbsp; <span id="cell-pos">C0R0</span></div>
+<div id="dev-tools">
+  <div id="dev-label">DEV MODE — Grid: 16×10 &nbsp;|&nbsp; <span id="cell-pos">C0R0</span></div>
+  <div id="cell-selector">
+    <label for="select-cells">
+      <input id="select-cells" type="checkbox">
+      Select Cells
+    </label>
+    <div id="cell-selector-help">Hold and drag across the room grid.</div>
+  </div>
+  <div id="grid-outputs">
+    <div id="grid-outputs-title">Grid Outputs <span id="grid-output-count">(0)</span></div>
+    <div id="grid-outputs-list"><span id="grid-outputs-empty">No cells selected</span></div>
+  </div>
+</div>
 
 <script>
 // ═══════════════════════════════════════════════════════════
@@ -211,6 +291,10 @@ let player = {
 let keys = { up: false, down: false, left: false, right: false };
 let dialogOpen = false;
 let lastTime = 0;
+let selectMode = false;
+let selectingCells = false;
+let selectionStart = null;
+let selectedCells = new Set();
 
 // Sprite images
 const sprites = {};
@@ -250,6 +334,112 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+
+// ═══════════════════════════════════════════════════════════
+//  INPUT — DEV CELL SELECTOR
+// ═══════════════════════════════════════════════════════════
+const selectCellsInput = document.getElementById('select-cells');
+const gridOutputs = document.getElementById('grid-outputs');
+const gridOutputsList = document.getElementById('grid-outputs-list');
+const gridOutputCount = document.getElementById('grid-output-count');
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function roomPointFromEvent(event) {
+  return {
+    x: clamp((event.clientX - offsetX) / scale, 0, ROOM_W - 0.001),
+    y: clamp((event.clientY - offsetY) / scale, 0, ROOM_H - 0.001),
+  };
+}
+
+function cellFromRoomPoint(point) {
+  return {
+    col: clamp(Math.floor(point.x / CELL_W), 0, COLS - 1),
+    row: clamp(Math.floor(point.y / CELL_H), 0, ROWS - 1),
+  };
+}
+
+function updateGridOutputs() {
+  gridOutputs.classList.toggle('visible', selectMode);
+  gridOutputCount.textContent = `(${selectedCells.size})`;
+  gridOutputsList.innerHTML = '';
+
+  if (selectedCells.size === 0) {
+    gridOutputsList.innerHTML = '<span id="grid-outputs-empty">No cells selected</span>';
+    return;
+  }
+
+  [...selectedCells]
+    .sort((a, b) => {
+      const [aCol, aRow] = a.split(',').map(Number);
+      const [bCol, bRow] = b.split(',').map(Number);
+      return aRow - bRow || aCol - bCol;
+    })
+    .forEach(key => {
+      const [col, row] = key.split(',');
+      const output = document.createElement('span');
+      output.className = 'grid-output';
+      output.textContent = `C${col}R${row}`;
+      gridOutputsList.appendChild(output);
+    });
+}
+
+function updateCellSelection(endPoint) {
+  const startCell = cellFromRoomPoint(selectionStart);
+  const endCell = cellFromRoomPoint(endPoint);
+  const minCol = Math.min(startCell.col, endCell.col);
+  const maxCol = Math.max(startCell.col, endCell.col);
+  const minRow = Math.min(startCell.row, endCell.row);
+  const maxRow = Math.max(startCell.row, endCell.row);
+
+  selectedCells.clear();
+  for (let row = minRow; row <= maxRow; row++) {
+    for (let col = minCol; col <= maxCol; col++) {
+      selectedCells.add(`${col},${row}`);
+    }
+  }
+  updateGridOutputs();
+}
+
+selectCellsInput.addEventListener('change', () => {
+  selectMode = selectCellsInput.checked;
+  canvas.classList.toggle('cell-selecting', selectMode);
+  if (!selectMode) {
+    selectingCells = false;
+    selectionStart = null;
+  }
+  updateGridOutputs();
+});
+
+canvas.addEventListener('pointerdown', event => {
+  if (!selectMode || event.button !== 0) return;
+  event.preventDefault();
+  selectingCells = true;
+  selectionStart = roomPointFromEvent(event);
+  canvas.setPointerCapture(event.pointerId);
+  updateCellSelection(selectionStart);
+});
+
+canvas.addEventListener('pointermove', event => {
+  if (!selectMode || !selectingCells) return;
+  event.preventDefault();
+  updateCellSelection(roomPointFromEvent(event));
+});
+
+function finishCellSelection(event) {
+  if (!selectingCells) return;
+  event.preventDefault();
+  selectingCells = false;
+  selectionStart = null;
+  if (canvas.hasPointerCapture(event.pointerId)) {
+    canvas.releasePointerCapture(event.pointerId);
+  }
+}
+
+canvas.addEventListener('pointerup', finishCellSelection);
+canvas.addEventListener('pointercancel', finishCellSelection);
 
 // ═══════════════════════════════════════════════════════════
 //  INPUT — KEYBOARD
@@ -435,6 +625,12 @@ function drawGrid() {
       const y = row * CELL_H;
       const key = `${col},${row}`;
 
+      // Dev-selected cells
+      if (selectedCells.has(key)) {
+        ctx.fillStyle = 'rgba(70, 205, 255, 0.28)';
+        ctx.fillRect(x, y, CELL_W, CELL_H);
+      }
+
       // Highlight interactive cells
       if (INTERACTIONS[key]) {
         ctx.fillStyle = 'rgba(255, 220, 80, 0.12)';
@@ -483,6 +679,17 @@ function drawGrid() {
   }
 
   ctx.setLineDash([]);
+
+  // Strong outline around selected cells so they remain visible over room art.
+  if (selectedCells.size > 0) {
+    ctx.strokeStyle = 'rgba(105,225,255,0.95)';
+    ctx.lineWidth = 3;
+    selectedCells.forEach(key => {
+      const [col, row] = key.split(',').map(Number);
+      ctx.strokeRect(col * CELL_W + 2, row * CELL_H + 2, CELL_W - 4, CELL_H - 4);
+    });
+  }
+
   ctx.restore();
 }
 
