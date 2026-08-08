@@ -203,6 +203,41 @@
     #grid-outputs-empty {
       color: rgba(255,255,255,0.55);
     }
+
+    /* ── Preview pane ── */
+    #preview-pane {
+      margin-top: 6px;
+      background: rgba(10,10,20,0.9);
+      border: 1px solid rgba(102,204,255,0.45);
+      border-radius: 5px;
+      padding: 8px;
+      display: none;
+    }
+    #preview-pane.visible { display: block; }
+    #preview-title {
+      color: #66ccff;
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+    #preview-wrap {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #preview-canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      image-rendering: pixelated;
+    }
+    #preview-empty {
+      color: rgba(255,255,255,0.55);
+      text-align: center;
+      padding: 24px 0;
+      font-size: 10px;
+    }
   </style>
 </head>
 <body>
@@ -237,6 +272,12 @@
   <div id="grid-outputs">
     <div id="grid-outputs-title">Grid Outputs <span id="grid-output-count">(0)</span></div>
     <div id="grid-outputs-list"><span id="grid-outputs-empty">No cells selected</span></div>
+  </div>
+  <div id="preview-pane">
+    <div id="preview-title">Preview</div>
+    <div id="preview-wrap">
+      <canvas id="preview-canvas" width="174" height="110"></canvas>
+    </div>
   </div>
 </div>
 
@@ -368,22 +409,106 @@ function updateGridOutputs() {
 
   if (selectedCells.size === 0) {
     gridOutputsList.innerHTML = '<span id="grid-outputs-empty">No cells selected</span>';
-    return;
+  } else {
+    [...selectedCells]
+      .sort((a, b) => {
+        const [aCol, aRow] = a.split(',').map(Number);
+        const [bCol, bRow] = b.split(',').map(Number);
+        return aRow - bRow || aCol - bCol;
+      })
+      .forEach(key => {
+        const [col, row] = key.split(',');
+        const output = document.createElement('span');
+        output.className = 'grid-output';
+        output.textContent = `C${col}R${row}`;
+        gridOutputsList.appendChild(output);
+      });
   }
 
-  [...selectedCells]
-    .sort((a, b) => {
-      const [aCol, aRow] = a.split(',').map(Number);
-      const [bCol, bRow] = b.split(',').map(Number);
-      return aRow - bRow || aCol - bCol;
-    })
-    .forEach(key => {
-      const [col, row] = key.split(',');
-      const output = document.createElement('span');
-      output.className = 'grid-output';
-      output.textContent = `C${col}R${row}`;
-      gridOutputsList.appendChild(output);
-    });
+  updatePreview();
+}
+
+// ── Preview pane ──────────────────────────────────────────
+const previewPane   = document.getElementById('preview-pane');
+const previewCanvas = document.getElementById('preview-canvas');
+const previewCtx    = previewCanvas.getContext('2d');
+
+function updatePreview() {
+  if (!selectMode || selectedCells.size === 0) {
+    previewPane.classList.remove('visible');
+    return;
+  }
+  previewPane.classList.add('visible');
+
+  // Bounding box of all selected cells, in room pixels
+  let minCol = COLS, maxCol = 0, minRow = ROWS, maxRow = 0;
+  selectedCells.forEach(key => {
+    const [col, row] = key.split(',').map(Number);
+    minCol = Math.min(minCol, col); maxCol = Math.max(maxCol, col);
+    minRow = Math.min(minRow, row); maxRow = Math.max(maxRow, row);
+  });
+
+  const srcX = minCol * CELL_W;
+  const srcY = minRow * CELL_H;
+  const srcW = (maxCol - minCol + 1) * CELL_W;
+  const srcH = (maxRow - minRow + 1) * CELL_H;
+
+  // Fit the crop into the preview canvas while keeping aspect ratio
+  const pw = previewCanvas.width;
+  const ph = previewCanvas.height;
+  const s = Math.min(pw / srcW, ph / srcH);
+  const dw = srcW * s;
+  const dh = srcH * s;
+  const dx = (pw - dw) / 2;
+  const dy = (ph - dh) / 2;
+
+  previewCtx.clearRect(0, 0, pw, ph);
+  previewCtx.fillStyle = '#000';
+  previewCtx.fillRect(0, 0, pw, ph);
+
+  // Draw the cropped room region
+  if (sprites.room.complete && sprites.room.naturalWidth > 0) {
+    previewCtx.drawImage(sprites.room, srcX, srcY, srcW, srcH, dx, dy, dw, dh);
+  } else {
+    previewCtx.fillStyle = '#1a1a2e';
+    previewCtx.fillRect(dx, dy, dw, dh);
+  }
+
+  // Draw grid lines within the crop
+  previewCtx.save();
+  previewCtx.translate(dx, dy);
+  previewCtx.scale(s, s);
+  previewCtx.strokeStyle = 'rgba(255,255,255,0.25)';
+  previewCtx.lineWidth = 1 / s;
+  previewCtx.setLineDash([4 / s, 6 / s]);
+  for (let col = 0; col <= maxCol - minCol + 1; col++) {
+    const x = col * CELL_W;
+    previewCtx.beginPath();
+    previewCtx.moveTo(x, 0);
+    previewCtx.lineTo(x, srcH);
+    previewCtx.stroke();
+  }
+  for (let row = 0; row <= maxRow - minRow + 1; row++) {
+    const y = row * CELL_H;
+    previewCtx.beginPath();
+    previewCtx.moveTo(0, y);
+    previewCtx.lineTo(srcW, y);
+    previewCtx.stroke();
+  }
+  previewCtx.setLineDash([]);
+
+  // Highlight selected cells
+  previewCtx.fillStyle = 'rgba(70,205,255,0.25)';
+  previewCtx.strokeStyle = 'rgba(105,225,255,0.95)';
+  previewCtx.lineWidth = 3 / s;
+  selectedCells.forEach(key => {
+    const [col, row] = key.split(',').map(Number);
+    const cx = (col - minCol) * CELL_W;
+    const cy = (row - minRow) * CELL_H;
+    previewCtx.fillRect(cx, cy, CELL_W, CELL_H);
+    previewCtx.strokeRect(cx + 2, cy + 2, CELL_W - 4, CELL_H - 4);
+  });
+  previewCtx.restore();
 }
 
 function updateCellSelection(endPoint) {
